@@ -1,0 +1,147 @@
+---
+title: "Controlling wildlife trade"
+author: "Muhammad Ezzat - AUG"
+date: "12/14/2019"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r,include=FALSE}
+#Used packages
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(fastDummies)
+library(treemap)
+library(markdown)
+library(rmarkdown)
+```
+> Inroduction
+
+  Undoubtedly human beings achieved culture by a lot of means, unfortunately they forgot one thing. Planet Earth,  the green planet we’re living on. The number of forest fires is increasing, global warming is tearing the Earth apart & a lot of animal species are endangered.
+  In an approach to achieve sustainability & save endangered species using modern-day technology, I’m suggesting a model that can guide us to control wildlife trade through data collected from CITES & IUCN organizations.
+
+> Importing & Joining Data 
+
+  After importing data from CSV files, an outer left join is used to obtain complete observations of wildlife external trade records across the whole world. One record contains the trade details, animal traded & it’s IUCN status [ Red List ].
+```{r,include=FALSE}
+wildlife <- read.csv("wildlife.csv",stringsAsFactors = FALSE)
+iucn <- read.csv("species.csv",stringsAsFactors = FALSE)
+iucn <- iucn %>% separate(Scientific.Name,into = c("Genus","sec"),sep=" ")
+
+manupilation_df <- merge(x=wildlife,y=iucn,by="Genus",all.x = TRUE)
+manupilation_df <-na.omit(manupilation_df)
+```
+```{r}
+dim(manupilation_df)
+```
+> Data Manupilation
+
+  Here some data manipulation took place, the resulting data frame contains columns of Trade Appendix, Trade Term, Reported Quantity & The IUCN red list status. The goal is to build a model that classifies or predict the effect of one trade on the traded animal’s conservation status based on the first three attributes mentioned. 
+```{r,include=FALSE}
+manupilation_df <- manupilation_df[,c(3,11,12,13,29)]
+manupilation_df$Conservation.Status[manupilation_df$Conservation.Status == ""] <- "Safe"
+manupilation_df <- manupilation_df %>% filter(Conservation.Status %in% c("Endangered","Safe","Species of Concern","Threatened"))
+manupilation_df <- manupilation_df %>% mutate(Reported.Quantity = Exporter.reported.quantity + Importer.reported.quantity)
+manupilation_df <- manupilation_df[,-c(2,3)]
+work_df <- manupilation_df
+```
+```{r}
+head(work_df)
+```
+
+> Exploratory Data Analysis 
+
+  	Now let's explore our data. The first graph shown in our EDA is a pie chart of the distribution of the variable Appindex , the appendix of the trade is the degree of safety of the transfer to the product delivered . It comes useful when the trade is an animal in it's living form.
+```{r,include=TRUE}
+ggplot(work_df,aes(x=1,fill=App.))+geom_bar(color="white")+coord_polar(theta="y") + theme_void()
+
+```
+
+	The next one is a histogram counting the number of cases in each IUCN conservation status class, where we can observe that safe species are the most ( good thing ), but the number of trades of species of concern is relatively high. The goal of the whole study is to guide that class towards the safe species class instead of being driven towards danger or threat. 
+```{r , include=TRUE,warning=FALSE,fig.width=9}
+ggplot(work_df,aes(x=Conservation.Status))+geom_histogram(stat="count")+coord_flip()
+```
+
+  	After checking on both appendix & conservation status , it's time to have a look at the combination of both variables. The proportion of conservation statues classes among each trade appendix class. It helps in understanding the distribution we have via a beautiful stacked bar chart.
+```{r,include=TRUE,fig.width=8}
+ggplot(work_df,aes(x=App. , fill = Conservation.Status))+geom_bar()
+```
+
+    	Finally, the most beautiful of them all. A tree-map. Mapping proportion of each trade term to the area of those squares appearing. It's obvious that trading live forms of animals is the most abundant trade term in our set.
+```{r,include=FALSE}
+t1 <- filter(wildlife,!is.na(Term))
+t1p <- group_by(t1, Term )
+t2p <- dplyr::summarise(t1p,  count=n())
+t2p <- filter(t2p, count>300)
+```
+```{r,include=TRUE,fig.width=9}
+treemap(t2p, index="Term", vSize="count", type="index", 
+        palette="Pastel2", title="WildLife Trade Term Treemap", fontsize.title=12)
+```
+
+> Preparing to model 
+
+	By looking at our tree-map we can observe that the variable Term had too many categories included. Regular machine learning algorithms in R can't handle them, So instead we will cluster our observations into a certain number of clusters to group them in categories according to their similarities. Statistically, that doesn't sound quite perfect, but it gives us a feasible computational solution.
+```{r,include=FALSE}
+clustering_df <- work_df[,-3]
+clustering_df <- clustering_df %>% mutate(App.=(str_length(App.)-1)/2)
+clustering_df$Term <- as.factor(clustering_df$Term)
+clustering_df <- dummy_columns(clustering_df)
+clustering_df <- clustering_df[,-2]
+
+
+wss <- 0
+for (i in 1:6 ) { 
+  wss[i] <- sum(kmeans(clustering_df, centers = i)$withinss) 
+}  
+```
+```{r,include=TRUE,fig.width=8}
+plot(1:6, wss, type = "b", xlab = "Number of Clusters", 
+     ylab = "Within groups sum of squares")
+
+```
+
+  Here I decided to go with the most abundant clustering method, Kmeans clustering. Kmeans clustering requires the number of desired clusters to be predefined. So we tried several values of the hyperparameter K & observed the total withness space in our clusters which allow us to pick the suitable K via the elbow plot technique. Which yielded to K = 3.
+```{r,include=TRUE,fig.width=8}
+km_out <- kmeans(clustering_df,centers=3,nstart = 20)
+hist(km_out$cluster)
+table(km_out$cluster)
+```
+
+```{r,include=FALSE}
+work_df <- cbind(work_df,km_out$cluster)
+names(work_df)[names(work_df) == "km_out$cluster"] <- "cluster"
+work_df$cluster <- as.factor(work_df$cluster)
+#split
+n_obs <- nrow(work_df)
+permuted_rows <- sample(n_obs)
+work_df_shuffled <- work_df[permuted_rows,]
+index <- round(n_obs * 0.75)
+index <- as.integer(index)
+train_data <- work_df_shuffled[1:index,]
+test_data <- work_df_shuffled[(index+1):nrow(work_df_shuffled),]
+```
+> Modeling 
+
+	Finally, it's time to build our model. Our model would simply predict the effect of the trade on the species traded based on the trade appendix, reported traded quantity & our generated cluster analysis.
+```{r,include=TRUE}
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+set.seed(7)
+fit.rf <- train(Conservation.Status ~ App. + Reported.Quantity + cluster,
+                data= train_data, method="rf", trControl=control)
+```
+```{r,include=TRUE}
+rf_predictions <- predict(fit.rf,test_data)
+test_data$Conservation.Status <- as.factor(test_data$Conservation.Status)
+m <- confusionMatrix(rf_predictions,test_data$Conservation.Status)
+print(m$overall)
+```
+>Conclusion
+
+   On assessing the model's quality we yielded an accuracy of 70 % which is quite satisfying to me. As George Box once said "All models are wrong, but some are useful", I find the idea of this model so attractive that we can apply later on with richer data that contain more descriptive attributes of an animal, that can be a good step towards achieving environmental sustainability.
